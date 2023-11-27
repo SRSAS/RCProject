@@ -19,6 +19,7 @@
 #define PWORD_SIZE 8
 #define STATUS_SIZE 4
 #define FILENAME_SIZE 25
+#define FILESIZE_DIGITS 9
 
 int fd_udp, fd_tcp, errcode;
 ssize_t n;
@@ -113,7 +114,7 @@ void logout() {
     else if(strcmp(status, "UNR") == 0)
         printf("Unknown user\n");
     else
-        print("Unknown login status\n");
+        print("Unknown logout status\n");
 }
 
 void unregister() {
@@ -152,17 +153,103 @@ void unregister() {
     else if(strcmp(status, "UNR") == 0)
         printf("Unknown user\n");
     else
-        print("Unknown login status\n");
+        print("Unknown unregister status\n");
 }
 
 void show_asset(char* aid) {
-    char message[SAS_MSG_SIZE], status[STATUS_SIZE], filename[FILENAME_SIZE], code[] = "SAS";
-    int file_size;
+    char  *startOfFile, status[STATUS_SIZE], filename[FILENAME_SIZE], fsize[FILESIZE_DIGITS], code[] = "SAS";
+    int file_size, remainingData, bytesBeforeFile;
+    FILE *file;
+
+    fd_tcp = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+    if (fd_tcp == -1) /*error*/ exit(EXIT_FAILURE);
 
     n = connect(fd_tcp, res_tcp->ai_addr, res_tcp->ai_addrlen);
     if(n==-1) /*error*/exit(EXIT_FAILURE);
 
+    if(write(fd_tcp, code, strlen(code)) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, ' ', 1) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, aid, strlen(aid)) == -1) /*error*/exit(EXIT_FAILURE);
+
+    memset(buffer, 0, 128);
+
+    n = recv(fd_tcp, buffer, 128, 0);
+    if(n==-1) /*error*/ exit(EXIT_FAILURE);
+
+    sscanf(buffer, "%s %s", NULL, status);
+
+    if(strcmp(status, "OK") == 0) {
+        sscanf(buffer, "%s %s %s %s", NULL, NULL, filename, fsize);
+        
+        bytesBeforeFile = 7 + strlen(filename) + 1 + strlen(fsize) + 1;
+        startOfFile = buffer + bytesBeforeFile;
+
+        file = fopen(filename, "w");
+        if(file == NULL) /*error*/ exit(EXIT_FAILURE);
+
+        n = fwrite(startOfFile, sizeof(char), n - bytesBeforeFile, file);
+        if(n==-1) /*error*/exit(EXIT_FAILURE);
+
+        file_size = atoi(fsize);
+        remainingData = file_size - (n - bytesBeforeFile);
+
+        while((remainingData > 0) && ((n = recv(fd_tcp, buffer, 128, 0)) > 0)) {
+            if (fwrite(buffer, sizeof(char), n, file) == -1) /*error*/ exit(EXIT_FAILURE);
+            remainingData -= n;
+        }
+
+        fclose(file);
+        printf("%s %s\n", filename, fsize);
+    }
+
+    else if(strcmp(status, "NOK") == 0)
+        printf("%s\n", status);
+    else
+        print("Unknown show_asset status\n");
     
+    close(fd_tcp);
+}
+
+void bid(char* aid, char* value) {
+    char status[STATUS_SIZE], code[] = "BID";
+    size_t codeSize = strlen(code);
+
+    fd_tcp = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+    if (fd_tcp == -1) /*error*/ exit(EXIT_FAILURE);
+
+    n = connect(fd_tcp, res_tcp->ai_addr, res_tcp->ai_addrlen);
+    if(n==-1) /*error*/exit(EXIT_FAILURE);
+
+    if(write(fd_tcp, code, codeSize) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, ' ', 1) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, userID, UID_SIZE) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, ' ', 1) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, password, PWORD_SIZE) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, ' ', 1) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, aid, strlen(aid)) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, ' ', 1) == -1) /*error*/exit(EXIT_FAILURE);
+    if(write(fd_tcp, value, strlen(value)) == -1) /*error*/exit(EXIT_FAILURE);
+
+    memset(buffer, 0, 128);
+    n = recv(fd_tcp, buffer, 128, 0);
+    if(n==-1) /*error*/ exit(EXIT_FAILURE);
+
+    sscanf(buffer, "%s %s", NULL, status);
+
+    if(strcmp(status, "ACC") == 0)
+        printf("Bid accepted\n");
+    else if(strcmp(status, "NOK") == 0)
+        printf("Auction %s is not active\n", aid);
+    else if(strcmp(status, "NLG") == 0)
+        printf("User not logged in\n");
+    else if(strcmp(status, "REF") == 0)
+        printf("Larger bid already previously placed");
+    else if(strcmp(status, "ILG") == 0)
+        printf("Cannot place a bid in auction hosted by yourself");
+    else
+        print("Unknown bid status\n");
+
+    close(fd_tcp);
 }
 
 void initializeSockets(char* ip, char* port) {
@@ -176,10 +263,6 @@ void initializeSockets(char* ip, char* port) {
 
     errcode = getaddrinfo(ip, port, &hints, &res_udp);
     if (errcode != 0) /*error*/ exit(EXIT_FAILURE);
-
-
-    fd_tcp = socket(AF_INET, SOCK_STREAM, 0); // UDP socket
-    if (fd_tcp == -1) /*error*/ exit(EXIT_FAILURE);
 
     hints.ai_socktype = SOCK_STREAM; // UDP socket
 
