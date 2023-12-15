@@ -20,6 +20,7 @@
 #define STATUS_SIZE 4
 #define FILENAME_SIZE 25
 #define FILESIZE_DIGITS 9
+#define RANDOM 1
 
 int fd_udp, fd_tcp, errcode;
 ssize_t n;
