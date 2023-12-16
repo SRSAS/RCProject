@@ -266,11 +266,15 @@ void show_asset(char* aid) {
     sendAndListen(TCP, message_size);
 
     if(strcmp(status, "OK") == 0) {
+        //Start reading the second part of the reply
+        n = read(fd_tcp, buffer, MAX_BUFFER_SIZE);
+        if(n==-1) /*error*/ exit(EXIT_FAILURE);
+
         //From the part of the message already received, get the filename and the its size
-        sscanf(buffer, "%*s %*s %s %s", filename, fsize);
+        sscanf(buffer, "%s %s", filename, fsize);
         
         //Calculate where in the message does the file data start
-        bytesBeforeFile = 7 + strlen(filename) + 1 + strlen(fsize) + 1;
+        bytesBeforeFile = strlen(filename) + 1 + strlen(fsize) + 1;
         startOfFile = buffer + bytesBeforeFile;
 
         //Create a file in write mode with the given filename
@@ -286,14 +290,13 @@ void show_asset(char* aid) {
         remainingData = file_size - (n - bytesBeforeFile);
 
         //While the file is incomplete and the socket still has data to read, keep reading the socket and writing to the file
-        while((remainingData > 0) && ((n = recv(fd_tcp, buffer, MAX_BUFFER_SIZE, 0)) > 0)) {
+        while((remainingData > 0) && ((n = read(fd_tcp, buffer, MAX_BUFFER_SIZE)) > 0)) {
             if (fwrite(buffer, sizeof(char), n, file) == -1) /*error*/ exit(EXIT_FAILURE);
             remainingData -= n;
         }
 
         close(fd_tcp);
         fclose(file);
-        printf("%s %s\n", filename, fsize);
     }
 
     else if(strcmp(status, "NOK") == 0)
