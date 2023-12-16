@@ -215,6 +215,8 @@ int is_users_password(char *uid, char *password) {
     char pass_path[29], stored_password[9];
     FILE *pass_file = NULL;
 
+    sprintf(pass_path, "USERS/%s/%s_pass.txt", uid, uid);
+
     pass_file = fopen(pass_path, "r");
 
     if(pass_file == NULL)
@@ -354,13 +356,15 @@ void unregister(char *uid, char* password) {
 
     if(!user_is_registered(uid)) {
         len = build_reply(replyCode, "UNR", NULL);
-        reply(UDP, len);
+        //reply(UDP, len);
+        printf(reply_buf);
         return;
     }
 
     if(!user_is_logged_in(uid)) {
         len = build_reply(replyCode, "NOK", NULL);
         reply(UDP, len);
+        printf(reply_buf);
         return;
     }
 
@@ -395,7 +399,6 @@ int main(int argc, char *argv[]) {
     FD_ZERO(&sockets);
     FD_SET(fd_udp, &sockets);
     FD_SET(fd_tcp, &sockets);
-    FD_SET(1, &sockets); //DEBUGGING
 
     while (1) {
         to_read = sockets;
@@ -404,22 +407,6 @@ int main(int argc, char *argv[]) {
         if(readable_count == -1) {
             perror("select");
             exit(1);
-        }
-
-        //DEBUGGING
-        if (FD_ISSET(1, &to_read)) {
-            fgets(buffer, BUFFER_SIZE, stdin);
-
-            sscanf(buffer, "%s", code);
-
-            if(strcmp(code, "LIN") == 0) {
-                sscanf(buffer, "%*s %s %s", arg1, arg2);
-                login(arg1, arg2);
-            }
-            else if(strcmp(code, "LOU") == 0) {
-                sscanf(buffer, "%*s %s %s", arg1, arg2);
-                logout(arg1, arg2);
-            }
         }
 
         if(FD_ISSET(fd_udp, &to_read)) {
@@ -455,6 +442,7 @@ int main(int argc, char *argv[]) {
             n = 0;
             memset(buffer, 0, BUFFER_SIZE);
             memset(code, 0, CODE_SIZE + 1);
+            memset(reply_buf, 0, REPLY_SIZE);
             memset(arg1, 0, MAX_ARG_SIZE + 1);
             memset(arg2, 0, MAX_ARG_SIZE + 1);
             memset(arg3, 0, MAX_ARG_SIZE + 1);
@@ -482,6 +470,7 @@ int main(int argc, char *argv[]) {
             n = 0;
             memset(buffer, 0, BUFFER_SIZE);
             memset(code, 0, CODE_SIZE + 1);
+            memset(reply_buf, 0, REPLY_SIZE);
             memset(arg1, 0, MAX_ARG_SIZE + 1);
             memset(arg2, 0, MAX_ARG_SIZE + 1);
             memset(arg3, 0, MAX_ARG_SIZE + 1);
