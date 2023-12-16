@@ -17,7 +17,9 @@
 #define PORT "58100"
 #define MAX_TCP_CONNECTION_QUEUE 10
 
+typedef enum {TCP, UDP} protocol;
 #define BUFFER_SIZE 40
+#define REPLY_SIZE 2200
 #define CODE_SIZE 3
 #define MAX_ARG_SIZE 24
 
@@ -27,6 +29,7 @@
 int verbose = FALSE;
 
 char buffer[BUFFER_SIZE];
+char reply_buf[REPLY_SIZE];
 char code[CODE_SIZE + 1];
 
 //Sockets' variables
@@ -72,6 +75,78 @@ void initializeSockets(char *port) {
 }
 
 /**
+ * Send the contents of the reply buffer to the stored address through the given protocol.
+*/
+void reply(protocol p, size_t length) {
+    if(p == UDP) {
+        n = sendto(fd_udp, reply_buf, length, 0, (struct sockaddr*)&addr, addrlen);
+        if(n == -1) /*error*/ exit(1);
+    }
+    else if(p == TCP) {
+        n = write(tcp_connection, reply_buf, length);
+        if(n == -1) /*error*/ exit(1);
+    }
+}
+
+/**
+ * Send back an error message to the client.
+*/
+void reply_error(protocol p) {
+    if(p == UDP) {
+        n = sendto(fd_udp, "ERR\n", 4, 0, (struct sockaddr*)&addr, addrlen);
+        if(n == -1) /*error*/ exit(1);
+    }
+    else if(p == TCP) {
+        n = write(tcp_connection, "ERR\n", 4);
+        if(n == -1) /*error*/ exit(1);
+    }
+}
+
+/**
+ * Take a code, a status, and optional arguments, and concatenate them all in the reply char array.
+ * Return size of the resulting string.
+*/
+size_t build_reply(char* reply_code, char* status, char** args) {
+    size_t offset, total = 0;
+    char* cursor = reply_buf;
+    char** arg_cursor = args;
+
+    offset = strlen(reply_code);
+    total += offset + 1;
+    memcpy(cursor, reply_code, offset);
+    cursor += offset;
+    *cursor = ' ';
+    cursor++;
+
+    offset = strlen(status);
+    total += offset + 1;
+    memcpy(cursor, status, offset);
+    cursor += offset;
+    *cursor = ' ';
+    cursor++;
+
+    if(args == NULL) {
+        cursor--;
+        *cursor = '\n';
+        return total;
+    }
+
+    while (*arg_cursor != NULL) {
+        offset = strlen(*arg_cursor);
+        total += offset + 1;
+        memcpy(cursor, *arg_cursor, offset);
+        cursor += offset;
+        *cursor = ' ';
+        cursor++;
+        arg_cursor++;
+    }
+
+    cursor--;
+    *cursor = '\n';
+    return total;
+}
+
+/**
  * Check if a string is composed only of digits.
  * Return 1 if true, 0 if false.
 */
@@ -93,20 +168,205 @@ int string_is_alnum(char* string) {
     return TRUE;
 }
 
+/**
+ * Check if a directory with path as its pathname exists.
+ * Return 1 if it does, 0 otherwise.
+*/
+int directory_exists(const char *path) {
+    struct stat buf;
+    if (stat(path, &buf) != 0)
+        return FALSE;
+
+    if(S_ISDIR(buf.st_mode))
+        return TRUE;
+    return FALSE;
+}
+
+/**
+ * Check if the user with uid is registered.
+ * Return 1 if they are, 0 otherwise.
+*/
+int user_is_registered(char *uid) {
+    char uid_path[13], pass_path[29];
+
+    sprintf(uid_path, "USERS/%s", uid);
+    sprintf(pass_path, "USERS/%s/%s_pass.txt", uid, uid);
+
+    return directory_exists(uid_path) && (access(pass_path, F_OK) == 0);
+}
+
+/**
+ * Check if the user with uid is logged in.
+ * Return 1 if they are, 0 otherwise.
+*/
+int user_is_logged_in(char *uid) {
+    char login_path[30];
+
+    sprintf(login_path, "USERS/%s/%s_login.txt", uid, uid);
+
+    return access(login_path, F_OK) == 0;
+}
+
+/**
+ * Check if the argument password matches the arguments uid.
+ * Return 1 if it does, 0 if not.
+*/
+int is_users_password(char *uid, char *password) {
+    char pass_path[29], stored_password[9];
+    FILE *pass_file = NULL;
+
+    pass_file = fopen(pass_path, "r");
+
+    if(pass_file == NULL)
+        return FALSE;
+
+    n = fread(stored_password, 1, 8, pass_file);
+    if (n == -1) /*error*/ exit(1);
+    fclose(pass_file);
+    stored_password[8] = '\0';
+
+    return strcmp(password, stored_password) == 0;
+}
+
+/**
+ * Create the necessary directories and password file to register the user.
+*/
+void register_user(char *uid, char *password) {
+    char uid_path[13], pass_path[29], hosted_path[20], bidded_path[20];
+    FILE *pass_file;
+
+    sprintf(uid_path, "USERS/%s", uid);
+    sprintf(pass_path, "USERS/%s/%s_pass.txt", uid, uid);
+    sprintf(hosted_path, "USERS/%s/HOSTED", uid);
+    sprintf(bidded_path, "USERS/%s/BIDDED", uid);
+
+    mkdir(uid_path, 0777);
+    mkdir(hosted_path, 0777);
+    mkdir(bidded_path, 0777);
+
+    pass_file = fopen(pass_path, "w");
+    n = fwrite(password, 1, 8, pass_file);
+    if (n == -1) /*error*/ exit(1);
+    fclose(pass_file);
+}
+
+/**
+ * Create the user's login file in the appropriate directory.
+*/
+void log_user_in(char *uid) {
+    char login_path[30];
+    FILE *login_file;
+
+    sprintf(login_path, "USERS/%s/%s_login.txt", uid, uid);
+
+    login_file = fopen(login_path, "w");
+    fclose(login_file);
+}
+
+/**
+ * Delete the user's login file.
+*/
+void log_user_out(char *uid) {
+    char login_path[30];
+    sprintf(login_path, "USERS/%s/%s_login.txt", uid, uid);
+
+    unlink(login_path);
+}
+
+/**
+ * Delete the user's login and password files.
+*/
+void unregister_user(char *uid) {
+    char pass_path[29];
+    sprintf(pass_path, "USERS/%s/%s_pass.txt", uid, uid);
+
+    unlink(pass_path);
+    log_user_out(uid);
+}
+
+/**
+ * Server's response to the login command.
+*/
 void login(char* uid, char* password) {
+    char replyCode[] = "RLI";
+    size_t len;
+    
     //Check the command's syntax
     if (n != 20 || strlen(uid) != 6 || strlen(password) != 8 || !string_is_number(uid) || !string_is_alnum(password)) {
-        n = sendto(fd_udp, "ERR\n", 4, 0, (struct sockaddr*)&addr, addrlen);
-        if(n == -1) /*error*/ exit(1);
+        reply_error(UDP);
+        return;
     }
 
-    //Check if UID already exists
-    //If UID exists, check if uid_pass.txt exists
-    //  If uid_pass.txt exists, check password against uid_pass.txt
-    //      If password is the same, check if there fopen uid_login.txt, and send RLI OK to client
-    //      Else if password is NOT the same, send RLI NOK to client
-    //  If uid_pass.txt does NOT exist, fopen uid_pass.txt, write password, and send RLI REG to client
-    //If UID does NOT exist, create UID directory, fopen uid_pass.txt, write password, and send RLI REG to client
+    if(!user_is_registered(uid)) {
+        register_user(uid, password);
+        len = build_reply(replyCode, "REG", NULL);
+        reply(UDP, len);
+        return;
+    }
+
+    if(!is_users_password(uid, password)) {
+        len = build_reply(replyCode, "NOK", NULL);
+        reply(UDP, len);
+        return;
+    }
+
+    log_user_in(uid);
+    len = build_reply(replyCode, "OK", NULL);
+    reply(UDP, len);
+}
+
+void logout(char *uid, char *password) {
+    char replyCode[] = "RLO";
+    size_t len;
+
+    //Check the command's syntax
+    if (n != 20 || strlen(uid) != 6 || strlen(password) != 8 || !string_is_number(uid) || !string_is_alnum(password)) {
+        reply_error(UDP);
+        return;
+    }
+
+    if(!user_is_registered(uid)) {
+        len = build_reply(replyCode, "UNR", NULL);
+        reply(UDP, len);
+        return;
+    }
+
+    if(!user_is_logged_in(uid) || !is_users_password(uid, password)) {
+        len = build_reply(replyCode, "NOK", NULL);
+        reply(UDP, len);
+        return;
+    }
+
+    log_user_out(uid);
+    len = build_reply(replyCode, "OK", NULL);
+    reply(UDP, len);
+}
+
+void unregister(char *uid, char* password) {
+    char replyCode[] = "RLO";
+    size_t len;
+
+    //Check the command's syntax
+    if (n != 20 || strlen(uid) != 6 || strlen(password) != 8 || !string_is_number(uid) || !string_is_alnum(password)) {
+        reply_error(UDP);
+        return;
+    }
+
+    if(!user_is_registered(uid)) {
+        len = build_reply(replyCode, "UNR", NULL);
+        reply(UDP, len);
+        return;
+    }
+
+    if(!user_is_logged_in(uid)) {
+        len = build_reply(replyCode, "NOK", NULL);
+        reply(UDP, len);
+        return;
+    }
+
+    unregister_user(uid);
+    len = build_reply(replyCode, "OK", NULL);
+    reply(UDP, len);
 }
 
 
@@ -135,6 +395,7 @@ int main(int argc, char *argv[]) {
     FD_ZERO(&sockets);
     FD_SET(fd_udp, &sockets);
     FD_SET(fd_tcp, &sockets);
+    FD_SET(1, &sockets); //DEBUGGING
 
     while (1) {
         to_read = sockets;
@@ -143,6 +404,22 @@ int main(int argc, char *argv[]) {
         if(readable_count == -1) {
             perror("select");
             exit(1);
+        }
+
+        //DEBUGGING
+        if (FD_ISSET(1, &to_read)) {
+            fgets(buffer, BUFFER_SIZE, stdin);
+
+            sscanf(buffer, "%s", code);
+
+            if(strcmp(code, "LIN") == 0) {
+                sscanf(buffer, "%*s %s %s", arg1, arg2);
+                login(arg1, arg2);
+            }
+            else if(strcmp(code, "LOU") == 0) {
+                sscanf(buffer, "%*s %s %s", arg1, arg2);
+                logout(arg1, arg2);
+            }
         }
 
         if(FD_ISSET(fd_udp, &to_read)) {
@@ -157,8 +434,14 @@ int main(int argc, char *argv[]) {
                 sscanf(buffer, "%*s %s %s", arg1, arg2);
                 login(arg1, arg2);
             }
-            else if(strcmp(code, "LOU") == 0) {}
-            else if(strcmp(code, "UNR") == 0) {}
+            else if(strcmp(code, "LOU") == 0) {
+                sscanf(buffer, "%*s %s %s", arg1, arg2);
+                logout(arg1, arg2);
+            }
+            else if(strcmp(code, "UNR") == 0) {
+                sscanf(buffer, "%*s %s %s", arg1, arg2);
+                unregister(arg1, arg2);
+            }
             else if(strcmp(code, "LMA") == 0) {}
             else if(strcmp(code, "LMB") == 0) {}
             else if(strcmp(code, "LST") == 0) {}
