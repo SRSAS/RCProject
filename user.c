@@ -9,6 +9,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <ctype.h>
+#include <errno.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -19,7 +20,7 @@
 
 /* Size of char arrays to contain messages received and messages to send, respectively */
 #define MAX_BUFFER_SIZE 2200
-#define MAX_MESSAGE_SIZE 20
+#define MAX_MESSAGE_SIZE 40
 
 /* Number of digits/chars of message elements */
 #define UID_SIZE 6
@@ -45,44 +46,25 @@ socklen_t addrlen;
 struct addrinfo hints, *res_udp, *res_tcp;
 struct sockaddr_in addr;
 
-int string_is_number(char* string) {
-    for (int i = 0; i < strlen(string); i++)
-        if(!isdigit(string[i]))
-            return FALSE;
-    return TRUE;
-}
-
-int string_is_alnum(char* string) {
-    for (int i = 0; i < strlen(string); i++)
-        if(!isalnum(string[i]))
-            return FALSE;
-    return TRUE;
-}
-
-void printUsage() {
-    fprintf(stderr, "Usage: ./user [-n ASIP] [-p ASport]\n");
-    exit(EXIT_FAILURE);
-}
-
 /**
- * Take an array of strings and concatenate them all in the message char array.
+ * Get address info for UDP and TCP sockets, and open UDP socket.
 */
-void build_message(char** args) {
-    size_t offset;
-    char* cursor = message;
-    char** arg_cursor = args;
+void initializeSockets(char* ip, char* port) {
+    addrlen = sizeof(addr);
+    fd_udp = socket(AF_INET, SOCK_DGRAM, 0); // UDP socket
+    if (fd_udp == -1) /*error*/ exit(EXIT_FAILURE);
 
-    while (*arg_cursor != NULL) {
-        offset = strlen(*arg_cursor);
-        memcpy(cursor, *arg_cursor, offset);
-        cursor += offset;
-        *cursor = ' ';
-        cursor++;
-        arg_cursor++;
-    }
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET; // IPv4
+    hints.ai_socktype = SOCK_DGRAM; // UDP socket
 
-    cursor--;
-    *cursor = '\n';
+    errcode = getaddrinfo(ip, port, &hints, &res_udp);
+    if (errcode != 0) /*error*/ exit(EXIT_FAILURE);
+
+    hints.ai_socktype = SOCK_STREAM; // TCP socket
+
+    errcode = getaddrinfo(ip, port, &hints, &res_tcp);
+    if (errcode != 0) /*error*/ exit(EXIT_FAILURE);
 }
 
 /**
@@ -91,21 +73,15 @@ void build_message(char** args) {
  * Automatically extract the status to the char array "status".
  * DOES NOT CLOSE TCP CONNECTION (so that bigger messages, such as files, may continue to be read)
 */
-void sendAndListen(protocol p) {
+void sendAndListen(protocol p, size_t message_length) {
     if(p == UDP) {
-        printf("Preparing to send\n");
         //Send
-        n = sendto(fd_udp, message, strlen(message), 0, res_udp->ai_addr, res_udp->ai_addrlen);
+        n = sendto(fd_udp, message, message_length, 0, res_udp->ai_addr, res_udp->ai_addrlen);
         if (n == -1) /*error*/ exit(EXIT_FAILURE);
-
-        printf("Am I stuck?\n");
 
         //Listen to the server's response and record it to buffer
         n = recvfrom(fd_udp, buffer, sizeof(buffer), 0, (struct sockaddr*)&addr, &addrlen);
-        if(n == 0) printf("Nothing to see here\n");
-
-        printf("Nope!\n");
-    if (n == -1) /*error*/ exit(EXIT_FAILURE);
+        if (n == -1) /*error*/ exit(EXIT_FAILURE);
     }
     else if(p == TCP) {
         //Get file descriptor for tcp socket
@@ -117,14 +93,80 @@ void sendAndListen(protocol p) {
         if(n==-1) /*error*/exit(EXIT_FAILURE);
 
         //Write to stream socket
-        if(write(fd_tcp, message, strlen(message)) == -1) /*error*/exit(EXIT_FAILURE);
+        n = write(fd_tcp, message, message_length);
+        if(n == -1) /*error*/exit(EXIT_FAILURE);
 
         //Listen to the server's response and record it to buffer
-        n = recv(fd_tcp, buffer, MAX_BUFFER_SIZE, 0);
+        n = read(fd_tcp, buffer, MAX_BUFFER_SIZE);
         if(n==-1) /*error*/ exit(EXIT_FAILURE);
 
     }
-    sscanf(buffer, "%s %s", NULL, status);
+    //Get the status from the server's first response
+    sscanf(buffer, "%*s %s", status);
+}
+
+/**
+ * Set global message variables to 0.
+*/
+void reset_data() {
+    memset(buffer, 0, MAX_BUFFER_SIZE);
+    memset(message, 0, MAX_MESSAGE_SIZE);
+    memset(status, 0, STATUS_SIZE  + 1);
+    n = 0;
+}
+
+/**
+ * Take an array of strings and concatenate them all in the message char array.
+ * Return size of message.
+*/
+size_t build_message(char** args) {
+    size_t offset, total = 0;
+    char* cursor = message;
+    char** arg_cursor = args;
+
+    while (*arg_cursor != NULL) {
+        offset = strlen(*arg_cursor);
+        total += offset + 1;
+        memcpy(cursor, *arg_cursor, offset);
+        cursor += offset;
+        *cursor = ' ';
+        cursor++;
+        arg_cursor++;
+    }
+
+    cursor--;
+    *cursor = '\n';
+    return total;
+}
+
+/**
+ * Check if a string is composed only of digits.
+ * Return 1 if true, 0 if false.
+*/
+int string_is_number(char* string) {
+    for (int i = 0; i < strlen(string); i++)
+        if(!isdigit(string[i]))
+            return FALSE;
+    return TRUE;
+}
+
+/**
+ * Check if a string is composed only of alphanumeric characters.
+ * Return 1 if true, 0 if false.
+*/
+int string_is_alnum(char* string) {
+    for (int i = 0; i < strlen(string); i++)
+        if(!isalnum(string[i]))
+            return FALSE;
+    return TRUE;
+}
+
+/**
+ * Print the usage of this program's optional arguments.
+*/
+void printUsage() {
+    fprintf(stderr, "Usage: ./user [-n ASIP] [-p ASport]\n");
+    exit(EXIT_FAILURE);
 }
 
 /**
@@ -145,7 +187,8 @@ void login(char* uid, char* pword) {
     }
     
     build_message(args);
-    sendAndListen(UDP);
+    sendAndListen(UDP, 20);
+    printf("STATUS: %s\n", status);
 
     if(strcmp(status, "OK") == 0) {
         printf("Successful login\n");
@@ -172,7 +215,7 @@ void logout() {
     char* args[] = {"LOU", userID, password, NULL};
 
     build_message(args);
-    sendAndListen(UDP);
+    sendAndListen(UDP, 20);
 
     if(strcmp(status, "OK") == 0)
         printf("Successful logout\n");
@@ -191,10 +234,7 @@ void unregister() {
     char* args[] = {"UNR", userID, password, NULL};
    
     build_message(args);
-    sendAndListen(UDP);
-
-    memset(userID, 0, UID_SIZE + 1);
-    memset(password, 0, PWORD_SIZE + 1);
+    sendAndListen(UDP, 20);
 
     if(strcmp(status, "OK") == 0)
         printf("Successful unregister\n");
@@ -213,6 +253,7 @@ void show_asset(char* aid) {
     char* args[] = {"SAS", aid, NULL};
     char  *startOfFile, filename[FILENAME_SIZE + 1], fsize[FILESIZE_DIGITS + 1];
     int file_size, remainingData, bytesBeforeFile;
+    size_t message_size;
     FILE *file;
 
     //Parse arguments
@@ -221,12 +262,12 @@ void show_asset(char* aid) {
         return;
     }
 
-    build_message(args);
-    sendAndListen(TCP);
+    message_size = build_message(args);
+    sendAndListen(TCP, message_size);
 
     if(strcmp(status, "OK") == 0) {
         //From the part of the message already received, get the filename and the its size
-        sscanf(buffer, "%s %s %s %s", NULL, NULL, filename, fsize);
+        sscanf(buffer, "%*s %*s %s %s", filename, fsize);
         
         //Calculate where in the message does the file data start
         bytesBeforeFile = 7 + strlen(filename) + 1 + strlen(fsize) + 1;
@@ -267,6 +308,7 @@ void show_asset(char* aid) {
 */
 void bid(char* aid, char* value) {
     char* args[] = {"BID", userID, password, aid, value, NULL};
+    size_t message_size;
 
     //Parse arguments
     if(strlen(aid) != AID_SIZE || !string_is_number(aid)) {
@@ -279,8 +321,8 @@ void bid(char* aid, char* value) {
         return;
     }
     
-    build_message(args);
-    sendAndListen(TCP);
+    message_size = build_message(args);
+    sendAndListen(TCP, message_size);
     close(fd_tcp);
 
     if(strcmp(status, "ACC") == 0)
@@ -381,31 +423,13 @@ void show_record(char* aid) {
     }
 
     build_message(args);
-    sendAndListen(UDP);
+    sendAndListen(UDP, 8);
 
     if(strcmp(status, "NOK") == 0)
         printf("Cannot find a bid for the given AID.\n");
     else if(strcmp(status, "OK") == 0) {
         print_show_record();
     }
-}
-
-void initializeSockets(char* ip, char* port) {
-    addrlen = sizeof(addr);
-    fd_udp = socket(AF_INET, SOCK_DGRAM, 0); // UDP socket
-    if (fd_udp == -1) /*error*/ exit(EXIT_FAILURE);
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET; // IPv4
-    hints.ai_socktype = SOCK_DGRAM; // UDP socket
-
-    errcode = getaddrinfo(ip, port, &hints, &res_udp);
-    if (errcode != 0) /*error*/ exit(EXIT_FAILURE);
-
-    hints.ai_socktype = SOCK_STREAM; // UDP socket
-
-    errcode = getaddrinfo(ip, port, &hints, &res_tcp);
-    if (errcode != 0) /*error*/ exit(EXIT_FAILURE);
 }
 
 int main(int argc, char *argv[]) {
@@ -431,6 +455,7 @@ int main(int argc, char *argv[]) {
     }
 
     initializeSockets(ip, port);
+    reset_data();
 
     while (1) {
         printf("Enter a command (or 'exit' to quit): ");
@@ -440,7 +465,7 @@ int main(int argc, char *argv[]) {
         sscanf(input, "%s", command);
 
         if (strcmp(command, "login") == 0) {
-            sscanf(input, "%s %s %s", command, arg1, arg2);
+            sscanf(input, "%*s %s %s", arg1, arg2);
             login(arg1, arg2);
         }
 
@@ -472,19 +497,27 @@ int main(int argc, char *argv[]) {
         }
 
         else if (strcmp(command, "show_asset") == 0 || strcmp(command, "sa") == 0) {
-            sscanf(input, "%s %s", command, arg1);
+            sscanf(input, "%*s %s", arg1);
             show_asset(arg1);
         }
 
         else if (strcmp(command, "bid") == 0 || strcmp(command, "b") == 0) {
-            sscanf(input, "%s %s %s", command, arg1, arg2);
+            sscanf(input, "%*s %s %s", arg1, arg2);
             bid(arg1, arg2);
         }
 
-        else if (strcmp(command, "show_record") || strcmp(command, "sr") == 0) {
-            sscanf(input, "%s %s", command, arg1);
+        else if (strcmp(command, "show_record") == 0 || strcmp(command, "sr") == 0) {
+            sscanf(input, "%*s %s", arg1);
             show_record(arg1);
         }
+
+        reset_data();
+        memset(input, 0, 128);
+        memset(command, 0, 20);
+        memset(arg1, 0, MAX_ARG_SIZE + 1);
+        memset(arg2, 0, MAX_ARG_SIZE + 1);
+        memset(arg3, 0, MAX_ARG_SIZE + 1);
+        memset(arg4, 0, MAX_ARG_SIZE + 1);
     }
 
     freeaddrinfo(res_udp);
