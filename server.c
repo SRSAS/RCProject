@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <time.h>
 
 #define PORT "58100"
 #define MAX_TCP_CONNECTION_QUEUE 10
@@ -77,15 +78,11 @@ void initializeSockets(char *port) {
 /**
  * Send the contents of the reply buffer to the stored address through the given protocol.
 */
-void reply(protocol p, size_t length) {
-    if(p == UDP) {
-        n = sendto(fd_udp, reply_buf, length, 0, (struct sockaddr*)&addr, addrlen);
-        if(n == -1) /*error*/ exit(1);
-    }
-    else if(p == TCP) {
-        n = write(tcp_connection, reply_buf, length);
-        if(n == -1) /*error*/ exit(1);
-    }
+size_t reply(protocol p, size_t length) {
+    if(p == UDP)
+        return sendto(fd_udp, reply_buf, length, 0, (struct sockaddr*)&addr, addrlen);
+    else if(p == TCP)
+        return write(tcp_connection, reply_buf, length);
 }
 
 /**
@@ -231,6 +228,140 @@ int is_users_password(char *uid, char *password) {
 }
 
 /**
+ * Check if the auction with the argument aid exists.
+ * Return 1 if it does, 0 if not.
+*/
+int auction_exists(char *aid) {
+    char auction_path[13];
+
+    sprintf(auction_path, "AUCTIONS/%s", aid);
+
+    return access(auction_path, F_OK) == 0;
+}
+
+/**
+ * Check if the auction with the argument aid has a file.
+ * Return 1 if it does, 0 if not.
+*/
+int auction_has_file(char *aid) {
+    char auction_path[13];
+    DIR *auctions;
+    struct dirent *auction_file;
+
+    sprintf(auction_path, "AUCTIONS/%s", aid);
+
+    auctions = opendir(auction_path);
+
+    while ((auction_file = readdir(auctions)) != NULL) {
+        if(strcmp(auction_file->d_name, ".") == 0 || strcmp(auction_file->d_name, "..") == 0)
+            continue;
+        
+        closedir(auctions);
+        return TRUE;
+    }
+
+    closedir(auctions);
+    return FALSE;
+}
+
+/**
+ * Check if the auction with the argument aid is still active (within its time frame).
+ * Return 1 if it is, 0 if it is not, -1 if an error has occured.
+ * DOES NOT ADD END_aid.txt file
+*/
+int auction_is_active(char *aid) {
+    char start_path[27], end_path[25], buff[128];
+    char timeactive_str[6], start_fulltime_str[21];
+    FILE *start;
+    time_t timeactive, start_fulltime, time_elapsed;
+
+    sprintf(start_path, "AUCTIONS/%s/START_%s.txt", aid, aid);
+    sprintf(end_path, "AUCTIONS/%s/END_%s.txt", aid, aid);
+
+    if(access(end_path, F_OK) == 0)
+        return FALSE;
+    
+    start = fopen(start_path, "r");
+    if(start == NULL) {
+        printf("auction_is_active ERROR: Couldn't open START_%s.txt file.\n", aid);
+        return -1;
+    }
+    if (fread(buff, 1, 128, start) == -1) {
+        printf("auction_is_active ERROR: Couldn't read START_%s.txt file.\n", aid);
+        fclose(start);
+        return -1;
+    }
+    fclose(start);
+
+    sscanf(buff, "%*s %*s %*s %*s %s %*s %s", timeactive_str, start_fulltime_str);
+
+    sprintf(timeactive_str, "%ld", timeactive);
+    sprintf(start_fulltime_str, "%ld", start_fulltime);
+
+    time(&time_elapsed);
+    time_elapsed -= start_fulltime;
+
+    if(time_elapsed >= timeactive)
+        return FALSE;
+    else
+        return TRUE;
+}
+
+/**
+ * Check if the user with the argument uid hosts the auction with the argument aid.
+ * Return 1 if they do, 0 otherwise.
+*/
+int user_hosts_auction(char *uid, char *aid) {
+    char hosted_path[28];
+
+    sprintf(hosted_path, "USERS/%s/HOSTED/%s.txt", uid, aid);
+
+    return access(hosted_path, F_OK) == 0;
+}
+
+/**
+ * Check if the bid is higher than the start value of the auction with the argument aid.
+ * Return 1 if it is, 0 otherwise.
+*/
+int bid_higher_than_start_value(char *aid, int bid) {
+    char start_path[27], buff[128];
+    FILE *start;
+    int start_value;
+
+    sprintf(start_path, "AUCTIONS/%s/START_%s.txt", aid, aid);
+    
+    start = fopen(start_path, "r");
+    if(start == NULL) {
+        printf("auction_is_active ERROR: Couldn't open START_%s.txt file.\n", aid);
+        return -1;
+    }
+    if (fread(buff, 1, 128, start) == -1) {
+        printf("auction_is_active ERROR: Couldn't read START_%s.txt file.\n", aid);
+        fclose(start);
+        return -1;
+    }
+    fclose(start);
+
+    sscanf(buff, "%*s %*s %*s %d", start_value);
+    return bid > start_value;
+}
+
+/**
+ * Check if the bid is the highest for the auction with the argument aid.
+ * Return 1 if it is, 0 otherwise, -1 for errors.
+*/
+int bid_is_highest(char *aid, int bid) {
+    char bids_path[18];
+    struct dirent **bids_list;
+    int num_bids;
+
+    sprintf(bids_path, "AUCTIONS/%s/BIDS", aid);
+
+    num_bids = scandir(bids_path, &bids_list, NULL, alphasort);
+
+}
+
+/**
  * Create the necessary directories and password file to register the user.
 */
 void register_user(char *uid, char *password) {
@@ -287,6 +418,109 @@ void unregister_user(char *uid) {
 }
 
 /**
+ * Copy onto dest_filename the name of the file associated with the auction with the given aid.
+*/
+void get_auction_filename(char *aid, char *dest_filename) {
+    char start_path[27], name_buffer[25], buff[128];
+    FILE *start;
+
+    sprintf(start_path, "AUCTIONS/%s/START_%s.txt", aid, aid);
+    
+    start = fopen(start_path, "r");
+    if(start == NULL) {
+        printf("auction_is_active ERROR: Couldn't open START_%s.txt file.\n", aid);
+        return -1;
+    }
+    if (fread(buff, 1, 128, start) == -1) {
+        printf("auction_is_active ERROR: Couldn't read START_%s.txt file.\n", aid);
+        fclose(start);
+        return -1;
+    }
+    fclose(start);
+
+    sscanf(buff, "%*s %*s %s", name_buffer);
+    strcpy(dest_filename, name_buffer);
+}
+
+/**
+ * Return the file's size in bytes.
+*/
+int get_filesize(const char *filepath) {
+    struct stat file_info;
+
+    if(stat(filepath, &file_info) == -1) {
+        perror("stat");
+        printf("get_filesize ERROR: couldn't find file with path  %s\n", filepath);
+        return -1;
+    }
+
+    return file_info.st_size;
+}
+
+/**
+ * Create END_aid.txt file for auction with the argument aid. Adjust end date-time to wether the timeactive has already passed.
+*/
+void close_auction(char *aid) {
+    char start_path[27], end_path[25], buff[128];
+    char timeactive_str[6], start_fulltime_str[21], end_date_time_str[20], time_elapsed_str[6];
+    FILE *start, *end;
+    time_t timeactive, start_fulltime, time_elapsed, end_time;
+    struct tm *end_date_time;
+
+    sprintf(start_path, "AUCTIONS/%s/START_%s.txt", aid, aid);
+    sprintf(end_path, "AUCTIONS/%s/END_%s.txt", aid, aid);
+    
+    start = fopen(start_path, "r");
+    if(start == NULL) {
+        printf("close_auction ERROR: Couldn't open START_%s.txt file.\n", aid);
+        return;
+    }
+    if (fread(buff, 1, 128, start) == -1) {
+        printf("close_auction ERROR: Couldn't read START_%s.txt file.\n", aid);
+        fclose(start);
+        return;
+    }
+    fclose(start);
+
+    sscanf(buff, "%*s %*s %*s %*s %s %*s %s", timeactive_str, start_fulltime_str);
+
+    sprintf(timeactive_str, "%ld", timeactive);
+    sprintf(start_fulltime_str, "%ld", start_fulltime);
+
+    time(&time_elapsed);
+    time_elapsed -= start_fulltime;
+
+    if(time_elapsed >= timeactive) {
+        end_time = start_fulltime + timeactive;
+        time_elapsed = timeactive;
+    }
+    else
+        time(&end_time);
+
+    end_date_time = gmtime(&end_time);
+    sprintf(end_date_time_str, "%4d-%02d-%02d %02d:%02d:%02d",
+                                end_date_time->tm_year+1900, end_date_time->tm_mon+1, end_date_time->tm_mday,
+                                end_date_time->tm_hour, end_date_time->tm_min, end_date_time->tm_sec);
+    sprintf(time_elapsed_str, "%ld", time_elapsed);
+
+    memset(buff, 0, 128);
+    memcpy(buff, end_date_time_str, 19);
+    memcpy(buff + 19, " ", 1);
+    memcpy(buff + 20, time_elapsed_str, strlen(time_elapsed_str) + 1);
+
+    end = fopen(end_path, "w");
+    if(end == NULL) {
+        printf("close_auction ERROR: Couldn't create END_%s.txt file\n", aid);
+        return;
+    }
+    if (fwrite(buff, 1, strlen(buff), end) == -1) {
+        printf("close_auction ERROR: Couldn't write to END_%s.txt file\n", aid);
+        fclose(end);
+        return;
+    }
+}
+
+/**
  * Server's response to the login command.
 */
 void login(char* uid, char* password) {
@@ -295,26 +529,31 @@ void login(char* uid, char* password) {
     
     //Check the command's syntax
     if (n != 20 || strlen(uid) != 6 || strlen(password) != 8 || !string_is_number(uid) || !string_is_alnum(password)) {
-        reply_error(UDP);
+        len = build_reply(replyCode, "ERR", NULL);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     if(!user_is_registered(uid)) {
         register_user(uid, password);
         len = build_reply(replyCode, "REG", NULL);
-        reply(UDP, len);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     if(!is_users_password(uid, password)) {
         len = build_reply(replyCode, "NOK", NULL);
-        reply(UDP, len);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     log_user_in(uid);
     len = build_reply(replyCode, "OK", NULL);
-    reply(UDP, len);
+    if (reply(UDP, len) == -1)
+        printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
 }
 
 void logout(char *uid, char *password) {
@@ -323,25 +562,30 @@ void logout(char *uid, char *password) {
 
     //Check the command's syntax
     if (n != 20 || strlen(uid) != 6 || strlen(password) != 8 || !string_is_number(uid) || !string_is_alnum(password)) {
-        reply_error(UDP);
+        len = build_reply(replyCode, "ERR", NULL);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     if(!user_is_registered(uid)) {
         len = build_reply(replyCode, "UNR", NULL);
-        reply(UDP, len);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     if(!user_is_logged_in(uid) || !is_users_password(uid, password)) {
         len = build_reply(replyCode, "NOK", NULL);
-        reply(UDP, len);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     log_user_out(uid);
     len = build_reply(replyCode, "OK", NULL);
-    reply(UDP, len);
+    if (reply(UDP, len) == -1)
+        printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
 }
 
 void unregister(char *uid, char* password) {
@@ -350,27 +594,104 @@ void unregister(char *uid, char* password) {
 
     //Check the command's syntax
     if (n != 20 || strlen(uid) != 6 || strlen(password) != 8 || !string_is_number(uid) || !string_is_alnum(password)) {
-        reply_error(UDP);
+        len = build_reply(replyCode, "ERR", NULL);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     if(!user_is_registered(uid)) {
         len = build_reply(replyCode, "UNR", NULL);
-        //reply(UDP, len);
-        printf(reply_buf);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     if(!user_is_logged_in(uid)) {
         len = build_reply(replyCode, "NOK", NULL);
-        reply(UDP, len);
-        printf(reply_buf);
+        if (reply(UDP, len) == -1)
+            printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
     unregister_user(uid);
     len = build_reply(replyCode, "OK", NULL);
-    reply(UDP, len);
+    if (reply(UDP, len) == -1)
+        printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+}
+
+void show_asset(char *aid) {
+    char replyCode[] = "RSA";
+    char filename[25], filesize[9], file_path[37], *cursor;
+    FILE *auction_file;
+    size_t len;
+    int fsize;
+
+    //Check the command's syntax
+    if(n != 7 || strlen(aid) != 3 || !string_is_number(aid)) {
+        len = build_reply(replyCode, "ERR", NULL);
+        if(reply(TCP, len) == -1)
+         printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    //Check if auction exists and has an associated file
+    if(!auction_exists(aid) || !auction_has_file(aid)) {
+        len = build_reply(replyCode, "NOK", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    //Send reply code and ok status
+    len = build_reply(replyCode, "OK", NULL);
+    reply_buf[len] = ' ';
+    reply(TCP, len);
+
+    get_auction_filename(aid, filename);
+    sprintf(file_path, "AUCTIONS/%s/%s", aid, filename);
+    fsize = get_filesize(file_path);
+    sprintf(filesize, "%d", fsize);
+
+    memset(reply_buf, 0, REPLY_SIZE);
+    sprintf(reply_buf, "%s %s ", filename, filesize);
+    cursor = reply_buf + strlen(reply_buf);
+
+    auction_file = fopen(file_path, "r");
+    if(fsize > 0) {
+        n = fread(cursor, 1, BUFFER_SIZE - strlen(reply_buf), auction_file);
+        if(n == -1) {
+            printf("%s ERROR: Couldn't read from auction file.\n", replyCode);
+            fclose(auction_file);
+            return;
+        }
+
+        fsize -= n;
+
+        n = reply(TCP, strlen(filename) + 1 + strlen(filesize) + 1 + n);
+        if(n == -1) {
+            printf("%s ERROR: Couldn't write to socket.\n", replyCode);
+            fclose(auction_file);
+            return;
+        }
+    }
+    while(fsize > 0) {
+        n = fread(reply_buf, 1, BUFFER_SIZE, auction_file);
+        if(n == -1) {
+            printf("%s ERROR: Couldn't read from auction file.\n", replyCode);
+            fclose(auction_file);
+            return;
+        }
+        fsize -= n;
+
+        //Send the read data through the TCP connection
+        if(reply(TCP, n) == -1) {
+            printf("%s ERROR: Couldn't write to socket.\n", replyCode);
+            fclose(auction_file);
+            return;
+        }
+    }
+    fclose(auction_file);
 }
 
 
@@ -433,10 +754,8 @@ int main(int argc, char *argv[]) {
             else if(strcmp(code, "LMB") == 0) {}
             else if(strcmp(code, "LST") == 0) {}
             else if(strcmp(code, "SRC") == 0) {}
-            else {
-                n = sendto(fd_udp, "ERR\n", 4, 0, (struct sockaddr*)&addr, addrlen);
-                if(n == -1) /*error*/ exit(1);
-            }
+            else
+                reply_error(UDP);
 
             //Reset data
             n = 0;
@@ -463,6 +782,8 @@ int main(int argc, char *argv[]) {
             else if(strcmp(code, "CLS") == 0) {}
             else if(strcmp(code, "SAS") == 0) {}
             else if(strcmp(code, "BID") == 0) {}
+            else
+                reply_error(TCP);
 
             close(tcp_connection);
 
