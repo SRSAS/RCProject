@@ -10,6 +10,7 @@
 #include <getopt.h>
 #include <ctype.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -188,7 +189,6 @@ void login(char* uid, char* pword) {
     
     build_message(args);
     sendAndListen(UDP, 20);
-    printf("STATUS: %s\n", status);
 
     if(strcmp(status, "OK") == 0) {
         printf("Successful login\n");
@@ -217,8 +217,11 @@ void logout() {
     build_message(args);
     sendAndListen(UDP, 20);
 
-    if(strcmp(status, "OK") == 0)
+    if(strcmp(status, "OK") == 0) {
         printf("Successful logout\n");
+        memset(userID, 0, UID_SIZE + 1);
+        memset(password, 0, PWORD_SIZE + 1);
+    }
     else if(strcmp(status, "NOK") == 0)
         printf("User not logged in\n");
     else if(strcmp(status, "UNR") == 0)
@@ -343,7 +346,7 @@ void bid(char* aid, char* value) {
 }
 
 /**
- * Read a line from src to dest. A line is any number of chars that that contain the specified number of spaces or that ends in a newline char.
+ * Read a line from src to dest. A line is any number of chars that contain the specified number of spaces or that end in a newline char.
  * Replaces spaces for tabs.
  * Return the length of the line read.
 */
@@ -435,6 +438,175 @@ void show_record(char* aid) {
     }
 }
 
+void print_auctions(char* command) {
+    //Advance to the auction data
+    char* cursor = buffer + 7;
+    char *token = strtok(buffer, " ");
+    
+    printf("%s ", command);
+    
+    // Process tokens
+    while (token != NULL) {
+        // Extract auction number and status
+        char auctionNumber[4];
+        strcpy(auctionNumber, token);
+        token = strtok(NULL, " ");
+        int status = atoi(token);
+
+        // Print the corresponding output
+        printf("\"%s\" - %s; ", auctionNumber, (status == 1) ? "active" : "inactive");
+
+        // Move to the next token
+        token = strtok(NULL, " ");
+
+        printf("\n");
+    }
+}
+
+/**
+ * My auctions command
+*/
+void my_auctions() {
+    char* args[] = {"LMA", userID, NULL};
+    build_message(args);
+    sendAndListen(UDP, 11);
+
+    if (strcmp(status, "NOK") == 0)
+        printf("User %s has not started any auctions.\n", userID);
+    else if (strcmp(status, "NLG") == 0) {
+        printf("User not logged in.\n");
+    }
+    else if (strcmp(status, "OK") == 0) {
+        print_auctions("My auctions:");
+    }
+}
+
+/**
+ * My bids command
+*/
+void my_bids() {
+    char* args[] = {"LMB", userID, NULL};
+    build_message(args);
+    sendAndListen(UDP, 11);
+
+    if (strcmp(status, "NOK") == 0)
+        printf("User %s has not placed any bids.\n", userID);
+    else if (strcmp(status, "NLG") == 0) {
+        printf("User not logged in.\n");
+    }
+    else if (strcmp(status, "OK") == 0) {
+        print_auctions("My bids:");
+    }
+}
+
+/**
+ * List command
+*/
+void list() {
+    strcpy(message, "LST\n");
+    sendAndListen(UDP, 4);
+
+    if (strcmp(status, "NOK") == 0)
+        printf("No auction was yet started.\n");
+    else if (strcmp(status, "OK") == 0) {
+        print_auctions("List of auctions:");
+    }
+}
+
+/**
+ * Return the file's size in bytes.
+*/
+int get_filesize(const char *filepath) {
+    struct stat file_info;
+
+    if(stat(filepath, &file_info) == -1) {
+        perror("stat");
+        printf("get_filesize ERROR: couldn't find file with path  %s\n", filepath);
+        return -1;
+    }
+
+    return file_info.st_size;
+}
+
+/**
+ * Open command
+*/
+void open(char* name, char* asset_fname, char* start_value, char* timeactive) {
+    FILE *auction_file;
+    size_t len;
+    int fsize = get_filesize(asset_fname);
+    char* cursor, fsize2[9];
+    sprintf(fsize2, "%d", fsize);
+    char* args[] = {"OPA", userID, password, name, start_value, timeactive, asset_fname, fsize2, NULL};
+    
+    len = build_message(args);
+    message[len - 1] = ' ';
+    
+    fd_tcp = socket(AF_INET, SOCK_STREAM, 0); // TCP socket
+    if (fd_tcp == -1) /*error*/ exit(EXIT_FAILURE);
+
+    //Connect socket to server
+    n = connect(fd_tcp, res_tcp->ai_addr, res_tcp->ai_addrlen);
+    if(n==-1) /*error*/exit(EXIT_FAILURE);
+
+    auction_file = fopen(asset_fname, "r");
+
+    n = fread(message + len, 1, MAX_MESSAGE_SIZE - len, auction_file);
+    if(n == -1) {
+        printf("ERROR: Couldn't read from auction file.\n");
+        fclose(auction_file);
+        close(fd_tcp);
+        return;
+    }
+
+    fsize -= n;
+    
+    n = write(fd_tcp, message, len + n);
+    if(n==-1) /*error*/exit(EXIT_FAILURE);
+    
+    while((fsize > 0) && ((n =fread(message, 1, MAX_MESSAGE_SIZE, auction_file)) > 0)) {
+        fsize -= n;
+
+        //Send the read data through the TCP connection
+        if(write(fd_tcp, message, n) == -1) {
+            printf("ERROR: Couldn't write to socket.\n");
+            fclose(auction_file);
+            return;
+        }
+    }
+    fclose(auction_file);
+
+    n = read(fd_tcp, buffer, MAX_BUFFER_SIZE);
+    if(n==-1) /*error*/ exit(EXIT_FAILURE);
+
+    sscanf(buffer, "%*s %s", status);
+
+    if (strcmp(status, "NOK") == 0)
+        printf("Auction could not be started\n");
+    else if (strcmp(status, "NLG") == 0) {
+        printf("User not logged in.\n");
+    }
+    else if (strcmp(status, "OK") == 0) {
+        char* cursor = buffer + 7;
+        printf("Auction created (aid: %s)   n", buffer);
+    }
+    else {
+        printf("Buffer contents:\n%s\n", buffer);
+    }
+
+    close(fd_tcp);
+}
+
+/**
+ * Close command
+*/
+void close_command(char* aid) {
+    char* args[] = {"CLS", userID, password, aid, NULL};
+    build_message(args);
+    sendAndListen(TCP, 24);
+    close(fd_tcp);
+}
+
 int main(int argc, char *argv[]) {
     char input[128], command[20];
     char arg1[MAX_ARG_SIZE + 1], arg2[MAX_ARG_SIZE + 1], arg3[MAX_ARG_SIZE + 1], arg4[MAX_ARG_SIZE + 1];
@@ -481,22 +653,33 @@ int main(int argc, char *argv[]) {
         }
         
         else if (strcmp(command, "exit") == 0) {
-            break;
+           if (strlen(userID) > 0) {
+                printf("Please execute the 'logout' command before exiting.\n");
+            } else {
+                break;
+            }
         }
         
         else if (strcmp(command, "open") == 0) {
+            sscanf(input, "%*s %s %s %s %s", arg1, arg2, arg3, arg4);
+            open(arg1, arg2, arg3, arg4);
         }
 
         else if (strcmp(command, "close") == 0) {
+            sscanf(input, "%*s %s", arg1);
+            close_command(arg1);
         }
 
         else if (strcmp(command, "myauctions") == 0 || strcmp(command, "ma") == 0)  {
+            my_auctions();
         }
 
         else if (strcmp(command, "mybids") == 0  || strcmp(command, "mb") == 0) {
+            my_bids();
         }
 
         else if (strcmp(command, "list") == 0 || strcmp(command, "l") == 0) {
+            list();
         }
 
         else if (strcmp(command, "show_asset") == 0 || strcmp(command, "sa") == 0) {
@@ -512,6 +695,10 @@ int main(int argc, char *argv[]) {
         else if (strcmp(command, "show_record") == 0 || strcmp(command, "sr") == 0) {
             sscanf(input, "%*s %s", arg1);
             show_record(arg1);
+        }
+
+        else {
+            printf("Unknown command.\n");
         }
 
         reset_data();
