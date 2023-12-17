@@ -39,6 +39,7 @@ ssize_t n;
 socklen_t addrlen;
 struct addrinfo hints, *res_udp, *res_tcp;
 struct sockaddr_in addr;
+char ipv4[17], peer_port[6];
 
 //Select variables
 fd_set sockets, to_read;
@@ -342,7 +343,7 @@ int bid_higher_than_start_value(char *aid, int bid) {
     }
     fclose(start);
 
-    sscanf(buff, "%*s %*s %*s %d", start_value);
+    sscanf(buff, "%*s %*s %*s %d", &start_value);
     return bid > start_value;
 }
 
@@ -353,12 +354,40 @@ int bid_higher_than_start_value(char *aid, int bid) {
 int bid_is_highest(char *aid, int bid) {
     char bids_path[18];
     struct dirent **bids_list;
-    int num_bids;
+    int num_bids, highest_bid;
 
     sprintf(bids_path, "AUCTIONS/%s/BIDS", aid);
 
     num_bids = scandir(bids_path, &bids_list, NULL, alphasort);
+    if (num_bids == -1) {
+        printf("bid_is_highest ERROR: Couldn't scan the directory %s\n", bids_path);
+        return -1;
+    }
 
+    //Check if current or previous directory aren't sorted as highest value
+    while (num_bids > 0) {
+        if(strcmp(bids_list[num_bids - 1]->d_name, ".") == 0 || strcmp(bids_list[num_bids - 1]->d_name, "..") == 0) {
+            free(bids_list[num_bids - 1]);
+            num_bids--;
+        }
+        else
+            break;
+    }
+
+    //If there are no bids, then it is the highest bid
+    if(num_bids == 0) {
+        free(bids_list);
+        return TRUE;
+    }
+    
+    sscanf(bids_list[num_bids - 1]->d_name, "%d.txt", &highest_bid);
+
+    for(int i = 0; i < num_bids; i++)
+        free(bids_list[i]);
+
+    free(bids_list);
+
+    return bid > highest_bid;
 }
 
 /**
@@ -429,6 +458,32 @@ void get_auction_filename(char *aid, char *dest_filename) {
     start = fopen(start_path, "r");
     if(start == NULL) {
         printf("auction_is_active ERROR: Couldn't open START_%s.txt file.\n", aid);
+        return;
+    }
+    if (fread(buff, 1, 128, start) == -1) {
+        printf("auction_is_active ERROR: Couldn't read START_%s.txt file.\n", aid);
+        fclose(start);
+        return;
+    }
+    fclose(start);
+
+    sscanf(buff, "%*s %*s %s", name_buffer);
+    strcpy(dest_filename, name_buffer);
+}
+
+/**
+ * Return the fulltime in seconds at which an auction started.
+*/
+time_t get_auction_start_time(char *aid) {
+    char start_path[27], buff[128];
+    FILE *start;
+    time_t result;
+
+    sprintf(start_path, "AUCTIONS/%s/START_%s.txt", aid, aid);
+    
+    start = fopen(start_path, "r");
+    if(start == NULL) {
+        printf("auction_is_active ERROR: Couldn't open START_%s.txt file.\n", aid);
         return -1;
     }
     if (fread(buff, 1, 128, start) == -1) {
@@ -438,8 +493,8 @@ void get_auction_filename(char *aid, char *dest_filename) {
     }
     fclose(start);
 
-    sscanf(buff, "%*s %*s %s", name_buffer);
-    strcpy(dest_filename, name_buffer);
+    sscanf(buff, "%*s %*s %*s %*s %*s %*s %ld", &result);
+    return result;
 }
 
 /**
@@ -518,6 +573,46 @@ void close_auction(char *aid) {
         fclose(end);
         return;
     }
+}
+
+void place_bid(char *uid, char *aid, int bid) {
+    char bidded_path[28], bid_path[29], bid_datetime[20], buff[128];
+    FILE *bidded, *bids;
+    time_t time_elapsed, current_seconds;
+    struct tm *current_time;
+
+    sprintf(bid_path, "AUCTIONS/%s/BIDS/%06d.txt", aid, bid);
+    sprintf(bidded_path, "USERS/%s/BIDDED/%s.txt", uid, aid);
+
+    time(&current_seconds);
+    time_elapsed = current_seconds - get_auction_start_time(aid);
+
+    current_time = gmtime(&current_seconds);
+
+    sprintf(bid_datetime, "%4d-%02d-%02d %02d:%02d:%02d",
+                                current_time->tm_year+1900, current_time->tm_mon+1, current_time->tm_mday,
+                                current_time->tm_hour, current_time->tm_min, current_time->tm_sec);
+
+    sprintf(buff, "%s %06d %s %ld", uid, bid, bid_datetime, time_elapsed);
+
+    bids = fopen(bid_path, "w");
+    if(bids == NULL) {
+        printf("place_bid ERROR: Couldn't create %s file\n", bid_path);
+        return;
+    }
+    if (fwrite(buff, 1, strlen(buff), bids) == -1) {
+        printf("place_bid ERROR: Couldn't write to %s file\n", bid_path);
+        fclose(bids);
+        return;
+    }
+    fclose(bids);
+
+    bidded = fopen(bidded_path, "w");
+    if(bidded == NULL) {
+        printf("place_bid ERROR: Couldn't create %s file\n", bidded_path);
+        return;
+    }
+    fclose(bidded);
 }
 
 /**
@@ -631,7 +726,7 @@ void show_asset(char *aid) {
     if(n != 7 || strlen(aid) != 3 || !string_is_number(aid)) {
         len = build_reply(replyCode, "ERR", NULL);
         if(reply(TCP, len) == -1)
-         printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
         return;
     }
 
@@ -645,7 +740,7 @@ void show_asset(char *aid) {
 
     //Send reply code and ok status
     len = build_reply(replyCode, "OK", NULL);
-    reply_buf[len] = ' ';
+    reply_buf[len - 1] = ' ';
     reply(TCP, len);
 
     get_auction_filename(aid, filename);
@@ -694,6 +789,173 @@ void show_asset(char *aid) {
     fclose(auction_file);
 }
 
+void bid(char *uid, char *password, char *aid, char *value) {
+    char replyCode[] = "RBD";
+    size_t len;
+    int bid;
+
+    //Check the command's syntax
+    if(n < 26 || strlen(uid) != 6 || !string_is_number(uid) || strlen(aid) != 3 || strlen(password) != 8 || !string_is_alnum(password) || !string_is_number(aid) || !string_is_number(value)) {
+        len = build_reply(replyCode, "ERR", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    sscanf(value, "%d", &bid);
+
+    if(!auction_exists(aid) || !user_is_registered(uid) || !auction_is_active(aid) || !is_users_password(uid, password)) {
+        len = build_reply(replyCode, "NOK", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    if(!user_is_logged_in(uid)) {
+        len = build_reply(replyCode, "NLG", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    if(user_hosts_auction(uid, aid)) {
+        len = build_reply(replyCode, "ILG", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    if(!bid_is_highest(aid, bid) || !bid_higher_than_start_value(aid, bid)) {
+        len = build_reply(replyCode, "REF", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    place_bid(uid, aid, bid);
+    len = build_reply(replyCode, "ACC", NULL);
+    if(reply(TCP, len) == -1)
+        printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+}
+
+void show_record(char *aid) {
+    char replyCode[] = "RRC";
+    char bids_path[18], start_path[27], end_path[25], bid_path[280];
+    char line_buffer[280], read_buffer[128], *args[53];
+    char word1[40], word2[40], word3[40], word4[40], word5[40], word6[40], word7[40];
+    int arg_count = 0, num_bids;
+    size_t len;
+    FILE *start, *bid, *end;
+    struct dirent **bids_list;
+
+    //Check the command's syntax
+    if(n != 7 || strlen(aid) != 3 || !string_is_number(aid)) {
+        len = build_reply(replyCode, "ERR", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    if(!auction_exists(aid)) {
+        len = build_reply(replyCode, "NOK", NULL);
+        if(reply(TCP, len) == -1)
+            printf("%s ERROR: Couldn't reply through TCP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+        return;
+    }
+
+    sprintf(start_path, "AUCTIONS/%s/START_%s.txt", aid, aid);
+    sprintf(bids_path, "AUCTIONS/%s/BIDS", aid);
+    sprintf(end_path, "AUCTIONS/%s/END_%s.txt", aid, aid);
+
+    start = fopen(start_path, "r");
+    if(start == NULL) {
+        printf("%s ERROR: Couldn't open %s file\n", replyCode, start_path);
+        return;
+    }
+    if(fread(read_buffer, 1, 128, start) == -1) {
+        printf("%s ERROR: Couldn't read from %s file\n", replyCode, start_path);
+        fclose(start);
+        return;
+    }
+    fclose(start);
+
+    sscanf(read_buffer, "%s %s %s %s %s %s %s", word1, word2, word3, word4, word5, word6, word7);
+    sprintf(line_buffer, "%s %s %s %s %s %s %s", word1, word2, word3, word4, word7, word5, word6);
+
+    args[arg_count++] = (char *)malloc(strlen(line_buffer));
+    strcpy(args[arg_count-1], line_buffer);
+
+    num_bids = scandir(bids_path, &bids_list, NULL, alphasort);
+    if (num_bids == -1) {
+        printf("%s ERROR: Couldn't scan the directory %s\n", replyCode, bids_path);
+        return;
+    }
+
+    while(num_bids > 0 && arg_count < 51) {
+        if(strcmp(bids_list[num_bids-1]->d_name, ".") == 0 || strcmp(bids_list[num_bids-1]->d_name, "..") == 0) {
+            free(bids_list[num_bids-1]);
+            num_bids--;
+            continue;
+        }
+
+        memset(line_buffer, 0, 128);
+        memset(read_buffer, 0, 128);
+
+        sprintf(bid_path, "%s/%s", bids_path, bids_list[num_bids-1]->d_name);
+        bid = fopen(bid_path, "r");
+        if(bid == NULL) {
+            printf("%s ERROR: Couldn't open %s file\n", replyCode, bid_path);
+            return;
+        }
+        if(fread(read_buffer, 1, 128, bid) == -1) {
+            printf("%s ERROR: Couldn't read from %s file\n", replyCode, bid_path);
+            fclose(bid);
+            return;
+        }
+        fclose(bid);
+
+        sprintf(line_buffer, "B %s", read_buffer);
+
+        args[arg_count++] = (char *)malloc(strlen(line_buffer));
+        strcpy(args[arg_count-1], line_buffer);
+
+        free(bids_list[num_bids-1]);
+        num_bids--;
+    }
+    free(bids_list);
+
+    if(!auction_is_active(aid)) {
+        memset(line_buffer, 0, 128);
+        memset(read_buffer, 0, 128);
+
+        end = fopen(end_path, "r");
+        if(end== NULL) {
+            printf("%s ERROR: Couldn't open %s file\n", replyCode, end_path);
+            return;
+        }
+        if(fread(read_buffer, 1, 128, end) == -1) {
+            printf("%s ERROR: Couldn't read from %s file\n", replyCode, end_path);
+            fclose(end);
+            return;
+        }
+        fclose(end);
+
+        sscanf(read_buffer, "%s %*s %s %s", word1, word2, word3);
+        sprintf(line_buffer, "E %s %s %s", word1, word2, word3);
+        
+        args[arg_count++] = (char *)malloc(strlen(line_buffer));
+        strcpy(args[arg_count-1], line_buffer);
+    }
+
+    args[arg_count] = NULL;
+    len = build_reply(replyCode, "OK", args);
+    for(int i = 0; i < arg_count; i++)
+        free(args[i]);
+    
+    if(reply(UDP, len) == -1) {
+        printf("%s ERROR: Couldn't reply through UDP.\nReply buffer contents: %s\n", replyCode, reply_buf);
+    }
+}
 
 int main(int argc, char *argv[]) {
     int opt;
@@ -707,6 +969,7 @@ int main(int argc, char *argv[]) {
                 break;
             case 'v':
                 verbose = TRUE;
+                printf("Operating in verbose mode.\n");
                 break;
             default:
                 exit(EXIT_FAILURE);
@@ -734,38 +997,70 @@ int main(int argc, char *argv[]) {
             n = recvfrom(fd_udp, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&addr, &addrlen);
             if(n == -1) /*error*/ exit(1);
 
-            if(n > 20 || n < 4) {}
+            if(verbose) {
+                if(inet_ntop(AF_INET, &(addr.sin_addr), ipv4, INET_ADDRSTRLEN) != NULL) {
+                    sprintf(port, "%d", ntohs(addr.sin_port));
+                    printf("Received a message on UDP socket from IP: %s, and Port: %s\nMessage of size: %ld\n", n);
+                }
+            }
 
-            sscanf(buffer, "%s", code);
-
-            if(strcmp(code, "LIN") == 0) {
-                sscanf(buffer, "%*s %s %s", arg1, arg2);
-                login(arg1, arg2);
-            }
-            else if(strcmp(code, "LOU") == 0) {
-                sscanf(buffer, "%*s %s %s", arg1, arg2);
-                logout(arg1, arg2);
-            }
-            else if(strcmp(code, "UNR") == 0) {
-                sscanf(buffer, "%*s %s %s", arg1, arg2);
-                unregister(arg1, arg2);
-            }
-            else if(strcmp(code, "LMA") == 0) {}
-            else if(strcmp(code, "LMB") == 0) {}
-            else if(strcmp(code, "LST") == 0) {}
-            else if(strcmp(code, "SRC") == 0) {}
-            else
+            if(n > 20 || n < 4) {
                 reply_error(UDP);
+            } else {
 
-            //Reset data
-            n = 0;
-            memset(buffer, 0, BUFFER_SIZE);
-            memset(code, 0, CODE_SIZE + 1);
-            memset(reply_buf, 0, REPLY_SIZE);
-            memset(arg1, 0, MAX_ARG_SIZE + 1);
-            memset(arg2, 0, MAX_ARG_SIZE + 1);
-            memset(arg3, 0, MAX_ARG_SIZE + 1);
-            memset(arg4, 0, MAX_ARG_SIZE + 1);
+                sscanf(buffer, "%s", code);
+
+                if(verbose)
+                    printf("Message code: %s\n", code);
+
+                if(strcmp(code, "LIN") == 0) {
+                    sscanf(buffer, "%*s %s %s", arg1, arg2);
+
+                    if(verbose)
+                        printf("UID: %s\n", arg1);
+
+                    login(arg1, arg2);
+                }
+                else if(strcmp(code, "LOU") == 0) {
+                    sscanf(buffer, "%*s %s %s", arg1, arg2);
+
+                    if(verbose)
+                        printf("UID: %s\n", arg1);
+
+                    logout(arg1, arg2);
+                }
+                else if(strcmp(code, "UNR") == 0) {
+                    sscanf(buffer, "%*s %s %s", arg1, arg2);
+
+                    if(verbose)
+                        printf("UID: %s\n", arg1);
+
+                    unregister(arg1, arg2);
+                }
+                else if(strcmp(code, "LMA") == 0) {}
+                else if(strcmp(code, "LMB") == 0) {}
+                else if(strcmp(code, "LST") == 0) {}
+                else if(strcmp(code, "SRC") == 0) {
+                    sscanf(buffer, "%*s %s", arg1);
+
+                    if(verbose)
+                        printf("AID: %s\n", arg1);
+
+                    show_record(arg1);
+                }
+                else
+                    reply_error(UDP);
+
+                //Reset data
+                n = 0;
+                memset(buffer, 0, BUFFER_SIZE);
+                memset(code, 0, CODE_SIZE + 1);
+                memset(reply_buf, 0, REPLY_SIZE);
+                memset(arg1, 0, MAX_ARG_SIZE + 1);
+                memset(arg2, 0, MAX_ARG_SIZE + 1);
+                memset(arg3, 0, MAX_ARG_SIZE + 1);
+                memset(arg4, 0, MAX_ARG_SIZE + 1);
+            }
 
         }
 
@@ -776,12 +1071,36 @@ int main(int argc, char *argv[]) {
             n = read(tcp_connection, buffer, BUFFER_SIZE);
             if(n == -1) /*error*/ exit(1);
 
+            if(verbose) {
+                if(inet_ntop(AF_INET, &(addr.sin_addr), ipv4, INET_ADDRSTRLEN) != NULL) {
+                    sprintf(port, "%d", ntohs(addr.sin_port));
+                    printf("Received a message on TCP socket from IP: %s, and Port: %s\nMessage of size: %ld\n", n);
+                }
+            }
+
             sscanf(buffer, "%s", code);
+
+            if(verbose)
+                    printf("Message code: %s\n", code);
 
             if(strcmp(code, "OPA") == 0) {}
             else if(strcmp(code, "CLS") == 0) {}
-            else if(strcmp(code, "SAS") == 0) {}
-            else if(strcmp(code, "BID") == 0) {}
+            else if(strcmp(code, "SAS") == 0) {
+                sscanf(buffer, "%*s %s", arg1);
+
+                if(verbose)
+                        printf("AID: %s\n", arg1);
+
+                show_asset(arg1);
+            }
+            else if(strcmp(code, "BID") == 0) {
+                sscanf(buffer, "%*s %s %s %s %s", arg1, arg2, arg3, arg4);
+
+                if(verbose)
+                    printf("UID: %s\n", arg1);
+
+                bid(arg1, arg2, arg3, arg4);
+            }
             else
                 reply_error(TCP);
 
